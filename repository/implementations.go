@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"time"
@@ -23,137 +22,147 @@ var (
 	-----END RSA PRIVATE KEY-----`
 )
 
-func (ur *Repository) CreateUser(ctx context.Context, phone, fullName, password string) (string, error) {
-	// Prepare SQL statement
+const (
+	queryUpdatePhoneNumber = `UPDATE users SET phone_number = :phone_number WHERE id = :id`
+	queryUpdateFullName    = `UPDATE users SET full_name = :full_name WHERE id = :id`
+	queryInsert            = `INSERT INTO users (phone_number, full_name, password) VALUES (:phone_number, :full_name, :password) RETURNING id`
+	querySelect            = `SELECT id, phone_number, full_name, password FROM users`
+)
+
+type User struct {
+	ID       int64  `db:"id"`
+	Phone    string `db:"phone_number"`
+	Fullname string `db:"full_name"`
+	Password string `db:"password"`
+}
+
+func (ur *Repository) CreateUser(ctx context.Context, phone, fullName, password string) (int64, error) {
 	hashedPassword, err := hashPassword(password)
 	if err != nil {
 		log.Println("Failed to hash password: ", err)
-		return "", err
+		return 0, err
 	}
 
-	stmt, err := ur.Db.Prepare("INSERT INTO users (phone_number, full_name, password) VALUES ($1, $2, $3) RETURNING id")
+	queryRowContext := ur.Db.QueryRowContext
+	query, args, err := funcSQLXNamed(queryInsert, User{
+		Phone:    phone,
+		Fullname: fullName,
+		Password: hashedPassword,
+	})
 	if err != nil {
-		log.Println("Failed to prepare SQL statement:", err)
-		return "", err
+		return 0, err
 	}
-	defer stmt.Close()
 
-	// Execute SQL statement
-	var userID string
-	err = stmt.QueryRow(phone, fullName, hashedPassword).Scan(&userID)
+	var userID int64
+	err = queryRowContext(ctx, query, args...).Scan(&userID)
 	if err != nil {
-		log.Println("Failed to execute SQL statement:", err)
-		return "", err
+		return 0, err
 	}
 
 	return userID, nil
 }
 
-func (ur *Repository) UpdateFullName(ctx context.Context, userID string, fullName string) error {
-	stmt, err := ur.Db.Prepare("UPDATE users SET full_name = $1 WHERE user_id = $2")
+func (ur *Repository) UpdateFullName(ctx context.Context, id int64, fullName string) error {
+	execContext := ur.Db.ExecContext
+	query, args, err := funcSQLXNamed(queryUpdateFullName, User{
+		ID:       id,
+		Fullname: fullName,
+	})
 	if err != nil {
-		log.Println("Failed to prepare SQL statement:", err)
-		return err
-	}
-	defer stmt.Close()
-
-	// Execute the SQL statement with the provided parameters
-	_, err = stmt.Exec(fullName, userID)
-	if err != nil {
-		// If an error occurs during the database update, return the error
 		return err
 	}
 
-	// If the database update is successful, return nil (no error)
-	return nil
-}
-
-func (ur *Repository) UpdatePhoneNumber(ctx context.Context, userID string, phoneNumber string) error {
-	stmt, err := ur.Db.Prepare("UPDATE users SET phone_number = $1 WHERE user_id = $2")
+	_, err = execContext(ctx, query, args...)
 	if err != nil {
-		log.Println("Failed to prepare SQL statement:", err)
-		return err
-	}
-	defer stmt.Close()
-
-	// Execute the SQL statement with the provided parameters
-	_, err = stmt.Exec(phoneNumber, userID)
-	if err != nil {
-		// If an error occurs during the database update, return the error
 		return err
 	}
 
 	return nil
 }
 
-func (ur *Repository) CheckPhoneNumberExists(ctx context.Context, userID string, phoneNumber string) bool {
-	var phone string
-	err := ur.Db.QueryRow("SELECT phone WHERE phone_number = $1 AND user_id = $2", phoneNumber, userID).Scan(&phone)
+func (ur *Repository) UpdatePhoneNumber(ctx context.Context, id int64, phoneNumber string) error {
+	execContext := ur.Db.ExecContext
+	query, args, err := funcSQLXNamed(queryUpdatePhoneNumber, User{
+		ID:    id,
+		Phone: phoneNumber,
+	})
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// User not found
-			return false
-		}
-		log.Println("Failed to execute SQL query:", err)
+		return err
+	}
+
+	_, err = execContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ur *Repository) CheckPhoneNumberExists(ctx context.Context, id int64, phoneNumber string) bool {
+	queryRowContext := ur.Db.QueryRowContext
+	query, args, err := funcSQLXNamed(querySelect+` WHERE id = :id AND phone_number = :phone_number`, User{
+		ID:    id,
+		Phone: phoneNumber,
+	})
+	if err != nil {
 		return false
 	}
 
-	if phone != "" {
+	var user User
+	err = queryRowContext(ctx, query, args...).Scan(&user.ID, &user.Phone, &user.Fullname, &user.Password)
+	log.Print(err)
+	if err != nil {
+		return false
+	}
+
+	if user.ID > 0 {
 		return true
 	}
 
 	return false
 }
 
-func (ur *Repository) AuthenticateUser(ctx context.Context, phone, password string) (string, string, error) {
-	var userID, hashedPassword string
-
-	// Query the database to find the user with the provided phone number
+func (ur *Repository) AuthenticateUser(ctx context.Context, phone, password string) (int64, string, error) {
 	hashedPassword, err := hashPassword(password)
 	if err != nil {
 		log.Println("Failed to hash password: ", err)
-		return "", "", err
+		return 0, "", err
 	}
 
-	err = ur.Db.QueryRow("SELECT id, password FROM users WHERE phone = $1 AND password = $2", phone, hashedPassword).Scan(&userID, &hashedPassword)
+	queryRowContext := ur.Db.QueryRowContext
+	query, args, err := funcSQLXNamed(querySelect+` WHERE phone_number = :phone_number AND password = :password`, User{
+		Phone:    phone,
+		Password: hashedPassword,
+	})
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// User not found
-			return "", "", err
-		}
-		log.Println("Failed to execute SQL query:", err)
-		return "", "", err
+		return 0, "", err
 	}
 
-	// Compare the provided password with the hashed password from the database
-	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)); err != nil {
-		// Passwords don't match
-		return "", "", err
+	var user User
+	err = queryRowContext(ctx, query, args...).Scan(&user.ID, &user.Password)
+	log.Print(err)
+	if err != nil {
+		return 0, "", err
 	}
 
-	// Create JWT Token Signature for login user
-	token, err := generateSignatureJWT(userID, hashedPassword, []byte(privateKey))
+	token, err := GenerateSignatureJWT(user.ID, hashedPassword, []byte(privateKey))
 	if err != nil {
 		log.Println("Failed generate signature JWT")
-		return "", "", err
+		return 0, "", err
 	}
 
-	return userID, token, nil
+	return user.ID, token, nil
 }
 
-func generateSignatureJWT(userID, password string, privateKey []byte) (string, error) {
-	// Define the claims
+func GenerateSignatureJWT(userID int64, password string, privateKey []byte) (string, error) {
 	claims := jwt.MapClaims{
 		"userID":   userID,
 		"password": password,
-		"exp":      time.Now().Add(time.Hour * 24).Unix(), // Token expiration time (1 day)
+		"exp":      time.Now().Add(time.Hour * 24).Unix(),
 	}
 
-	// Create the token
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-
-	// Sign the token with the private key
-	tokenString, err := token.SignedString(privateKey)
+	tokenJWT = jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tokenString, err := tokenSignedString(privateKey)
 	if err != nil {
 		return "", err
 	}
@@ -162,8 +171,7 @@ func generateSignatureJWT(userID, password string, privateKey []byte) (string, e
 }
 
 func hashPassword(password string) (string, error) {
-	// Generate a salted hash of the password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hashedPassword, err := generatePassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		fmt.Println("Failed to generate salted hash:", err)
 		return "", err

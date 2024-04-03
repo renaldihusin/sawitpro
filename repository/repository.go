@@ -4,7 +4,20 @@ package repository
 import (
 	"database/sql"
 
+	"github.com/golang-jwt/jwt"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
+)
+
+//go:generate mockgen -source=./repository.go -destination=./repository_mock.go -package=repository
+
+// For mocking purpose
+var (
+	tokenJWT          *jwt.Token
+	tokenSignedString = tokenJWT.SignedString
+	generatePassword  = bcrypt.GenerateFromPassword
+	funcSQLXNamed     = sqlx.Named
 )
 
 type Repository struct {
